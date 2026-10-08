@@ -1,0 +1,4 @@
+interface:
+  display_name: "蓝白叙事型 HTML PPT"
+  short_description: "将文章与讲述素材生成以 SVG 图解为主、支持离线演示与每页讲稿的蓝白 HTML PPT"
+  default_prompt: "使用 $zhxbai-html-slides，把我的素材制作成蓝白叙事型 HTML PPT，屏幕保留讲述锚点，详细解释放入讲稿。"
