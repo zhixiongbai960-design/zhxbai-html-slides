@@ -33,18 +33,12 @@ async function main() {
     const count = await page.locator('.slide').count();
     if (!count) throw new Error('No slides');
     await fs.mkdir(output, { recursive: true });
-    for (const viewport of [{ width: 1600, height: 960 }, { width: 1280, height: 800 }, { width: 900, height: 430 }, { width: 390, height: 844 }]) {
-      await page.setViewportSize(viewport);
-      await page.waitForFunction(() => Math.abs(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--scale')) - Math.min(innerWidth / 1600, Math.max(100, innerHeight - 60) / 900)) < .0001);
-      await page.keyboard.press('Home');
-      for (let i = 0; i < count; i++) {
-        if (i) await page.keyboard.press('ArrowRight');
-        const report = await page.locator('.slide.active').evaluate(slide => {
+    const inspectSlide = slide => {
           const bounds = slide.getBoundingClientRect(), issues = [];
           const scale = bounds.width / 1600, eps = Math.max(.7, scale);
           const outside = (a, b) => a.left < b.left - eps || a.right > b.right + eps || a.top < b.top - eps || a.bottom > b.bottom + eps;
           if (Math.abs(bounds.width / bounds.height - 16 / 9) > .005) issues.push('Invalid aspect ratio');
-          if (bounds.left < -eps || bounds.right > innerWidth + eps || bounds.top < -eps || bounds.bottom > innerHeight - 60 + eps) issues.push('Canvas outside viewport');
+          if (bounds.left < -eps || bounds.right > innerWidth + eps || bounds.top < -eps || bounds.bottom > innerHeight - (document.fullscreenElement ? 0 : 60) + eps) issues.push('Canvas outside viewport');
           for (const node of slide.querySelectorAll('*')) {
             if (!node.getClientRects().length) continue;
             const rect = node.getBoundingClientRect();
@@ -80,7 +74,14 @@ async function main() {
           }
           if (!slide.dataset.layout || !slide.getAttribute('aria-label')) issues.push('Missing layout or page title');
           return { title: slide.getAttribute('aria-label'), layout: slide.dataset.layout, issues: [...new Set(issues)] };
-        });
+        };
+    for (const viewport of [{ width: 1600, height: 960 }, { width: 1280, height: 800 }, { width: 900, height: 430 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      await page.waitForFunction(() => Math.abs(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--scale')) - Math.min(innerWidth / 1600, Math.max(100, innerHeight - 60) / 900)) < .0001);
+      await page.keyboard.press('Home');
+      for (let i = 0; i < count; i++) {
+        if (i) await page.keyboard.press('ArrowRight');
+        const report = await page.locator('.slide.active').evaluate(inspectSlide);
         reports.push({ viewport, slide: i + 1, ...report });
         if (report.issues.length) failures.push(`${viewport.width} slide ${i + 1}: ${report.issues.join('; ')}`);
         if (viewport.width === 1600) await page.locator('.slide.active').screenshot({ path: path.join(output, `slide_${String(i + 1).padStart(2, '0')}.png`) });
@@ -97,7 +98,9 @@ async function main() {
     await page.keyboard.press('Home');
     if (count > 1) { await page.locator('#next').click(); await expectIndex(1, 'Next button'); await page.locator('#prev').click(); await expectIndex(0, 'Previous button'); }
     await page.keyboard.press('Escape');
-    if (!await page.locator('#overview').evaluate(d => d.open)) failures.push('Directory did not open');
+    if (await page.locator('#overview').evaluate(d => d.open)) failures.push('Escape unexpectedly opened directory');
+    await page.locator('#index').click();
+    if (!await page.locator('#overview').evaluate(d => d.open)) failures.push('Directory button did not open');
     await page.locator('#index-list button').last().click(); await expectIndex(count - 1, 'Directory jump');
     if (await page.locator('#overview').evaluate(d => d.open)) failures.push('Directory did not close');
     await page.locator('#index').click(); await page.keyboard.press('Escape');
@@ -119,6 +122,34 @@ async function main() {
         if (await page.locator('#speaker-dialog').evaluate(d => d.open) || await page.locator('#overview').evaluate(d => d.open)) failures.push(`Notes close interferes with dialogs on page ${i + 1}`);
       }
     }
+    await page.locator('#fullscreen').click();
+    await page.waitForFunction(() => Boolean(document.fullscreenElement));
+    await page.waitForFunction(() => getComputedStyle(document.querySelector('#controls')).display === 'none' && Math.abs(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--scale')) - Math.min(innerWidth / 1600, Math.max(100, innerHeight) / 900)) < .0001);
+    if (!await page.locator('#controls').evaluate(node => node.inert)) failures.push('Fullscreen controls remain focusable');
+    await page.keyboard.press('f');
+    if (!await page.evaluate(() => Boolean(document.fullscreenElement))) failures.push('F exited fullscreen');
+    await page.keyboard.press('Home');
+    for (let i = 0; i < count; i++) {
+      if (i) await page.keyboard.press('ArrowRight');
+      const report = await page.locator('.slide.active').evaluate(inspectSlide);
+      reports.push({ viewport: page.viewportSize(), fullscreen: true, slide: i + 1, ...report });
+      if (report.issues.length) failures.push(`Fullscreen slide ${i + 1}: ${report.issues.join('; ')}`);
+    }
+    await expectIndex(count - 1, 'Fullscreen navigation');
+    await page.screenshot({ path: path.join(output, 'fullscreen_window.png') });
+    if (await notesButton.count()) {
+      await page.keyboard.press('n');
+      if (!await page.locator('#speaker-dialog').evaluate(dialog => dialog.open)) failures.push('Fullscreen notes did not open');
+    }
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.fullscreenElement && getComputedStyle(document.querySelector('#controls')).display === 'flex' && Math.abs(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--scale')) - Math.min(innerWidth / 1600, Math.max(100, innerHeight - 60) / 900)) < .0001);
+    if (await page.locator('dialog').evaluateAll(dialogs => dialogs.some(dialog => dialog.open))) failures.push('Escape left a dialog open after fullscreen');
+    if (await page.locator('#controls').evaluate(node => node.inert)) failures.push('Restored controls remain inert');
+    await expectIndex(count - 1, 'Fullscreen exit keeps current page');
+    await page.keyboard.press('f');
+    await page.waitForFunction(() => Boolean(document.fullscreenElement));
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.fullscreenElement);
     await page.emulateMedia({ media: 'print' });
     const printStates = await page.locator('.slide').evaluateAll(slides => slides.map(slide => ({ visibility: getComputedStyle(slide).visibility, position: getComputedStyle(slide).position })));
     if (printStates.some(s => s.visibility !== 'visible' || s.position !== 'relative')) failures.push('Print styles hide slides');
@@ -127,7 +158,7 @@ async function main() {
     if (external.length) failures.push(`External dependencies: ${[...new Set(external)].join(', ')}`);
     const result = { slides: count, reports, failures, external, runtime };
     await fs.writeFile(path.join(output, 'checks.json'), JSON.stringify(result, null, 2));
-    console.log(JSON.stringify({ slides: count, viewports: 4, failures, output }, null, 2));
+    console.log(JSON.stringify({ slides: count, viewports: 4, fullscreen: "button, F, Escape, scale and menu verified", failures, output }, null, 2));
     if (failures.length) throw new Error('Deck checks failed; inspect checks.json and screenshots');
   } finally { if (browser) await browser.close(); }
 }
